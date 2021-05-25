@@ -14,8 +14,9 @@ const (
 )
 
 type Debt struct {
-	ID     int     `json:"id"`
-	Amount float64 `json:"amount"`
+	ID            int     `json:"id"`
+	Amount        float64 `json:"amount"`
+	InPaymentPlan bool    `json:"is_in_payment_plan,omitempty"`
 }
 
 type PaymentPlan struct {
@@ -52,35 +53,40 @@ func main() {
 
 	var debts map[int]Debt
 	var plans map[int]PaymentPlan
-	for {
+
+	for timedOut := false; waitCount < 2 && timedOut != true; {
 		select {
 		case debtWrapper := <-debtsChannel:
 			waitCount++
-
-			if debtWrapper.err != nil {
+			if debtWrapper.err == nil {
 				debts = debtWrapper.debts
+			} else {
+				fmt.Errorf("Error encountered retrieving or parsing Debts:%v", debtWrapper.err)
 			}
 			if waitCount > 1 {
 				break
 			}
 		case planWrapper := <-paymentsChannel:
-
-			if planWrapper.err != nil {
-				plans = planWrapper.paymentPlans
-			}
 			waitCount++
+			if planWrapper.err == nil {
+				plans = planWrapper.paymentPlans
+			} else {
+				fmt.Errorf("Error encountered retrieving or parsing Payment Plans:%v", planWrapper.err)
+			}
+
 			if waitCount > 1 {
 				break
 			}
 		case <-time.After(240 * time.Second):
 			fmt.Println("Timed out")
+			timedOut = true
 			break
 		}
 	}
 
-	//  If we got plans and debts back
-	if plans != nil && debts != nil {
-
+	if plans == nil || debts == nil {
+		fmt.Errorf("There was a problem gathering Debts or Payment Plans. kthxbye.")
+		return
 	}
 
 }
@@ -121,7 +127,7 @@ func pullDebts(results chan DebtsReturn, serverUri string) {
 	defer func() {
 		if resp != nil {
 			if resp.Body != nil {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				resp.Body = nil
 			}
 			resp = nil
