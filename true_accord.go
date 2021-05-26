@@ -64,6 +64,22 @@ type PaymentsReturn struct {
 }
 
 func main() {
+
+	var debts map[int]Debt
+
+	//  Populate the debts structure which includes debts, plans and payments
+	err := populateDebts(debts)
+
+	if err != nil {
+		fmt.Printf("Error populating debts:%v", err)
+		return
+	}
+	return
+}
+
+func populateDebts(debts map[int]Debt) error {
+	var err error = nil
+
 	var debtsChannel chan DebtsReturn = nil
 	var paymentPlanChannel chan PaymentPlansReturn = nil
 	var paymentsChannel chan PaymentsReturn = nil
@@ -77,7 +93,6 @@ func main() {
 	go pullPaymentPlans(paymentPlanChannel, paymentPlanApiServer)
 	go pullPayments(paymentsChannel, paymentsApiServer)
 
-	var debts map[int]Debt
 	var plans map[int]PaymentPlan
 	var payments map[int]Payment
 
@@ -125,19 +140,17 @@ func main() {
 	}
 
 	if plans == nil || debts == nil || payments == nil {
-		fmt.Errorf("There was a problem gathering Debts, Payments, or Payment Plans.")
-		return
+		return fmt.Errorf("There was a problem gathering Debts, Payments, or Payment Plans.")
 	}
 
 	//  Since all this ends up being hierarchical anyway, let's make it a graph
-	err := unflattenData(debts, plans, payments)
+	err = unflattenData(debts, plans, payments)
 
 	if err != nil {
-		fmt.Errorf("Unexpected error encountered flattening data:%v", err)
-		return
+		return fmt.Errorf("Unexpected error encountered flattening data:%v", err)
 	}
 
-	return
+	return err
 }
 
 func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payments map[int]Payment) error {
@@ -160,19 +173,20 @@ func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payment
 
 			//  We will use this slice to build up a list of payments that are relevant to a
 			//  given payment plan
-			tempPayments := make([]Payment, 1)
+			var tempPayments []Payment
 
 			//  We will use this slice to keep track of payments that have been added to a plan
 			//  that we can remove from our payments collection
-			paymentDeletions := make([]int, 1)
+			var paymentDeletions []int
 
 			//  Iterate through all the payments, matching the payments by plan id
 			//  to their owner plans
 			for pid, payment := range payments {
 				if payment.PaymentPlanID == planId {
 					tempPayments = append(tempPayments, payment)
+					paymentDeletions = append(paymentDeletions, pid)
 				}
-				paymentDeletions = append(paymentDeletions, pid)
+
 			}
 			//  Store those payments in the plan
 			debt.paymentPlan.payments = tempPayments
@@ -183,6 +197,8 @@ func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payment
 				delete(payments, pid)
 			}
 		} // end if ok
+		//  Store the modified debt object back in the collection
+		debts[debtId] = debt
 	} //  end outer debt loop
 
 	//  If we have any plans leftover, that's an error
