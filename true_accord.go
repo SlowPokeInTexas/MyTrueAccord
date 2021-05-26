@@ -84,6 +84,13 @@ type PaymentsReturn struct {
 	err      error
 }
 
+/*type JSONDate time.Time
+
+func (t JSONDate) MarshalJSON() ([]byte, error) {
+	rvalue := fmt.Sprintf("\"%s\"", time.Time(t).Format(isoLayout))
+	return []byte(rvalue), nil
+}*/
+
 func main() {
 	var err error = nil
 
@@ -621,7 +628,7 @@ func (debt *Debt) calculateNextPaymentDate(updateObject bool) string {
 			}
 
 			if !nextScheduledDate.IsZero() {
-				nextPaymentDate = nextScheduledDate.String()
+				nextPaymentDate = nextScheduledDate.Format(isoLayout)
 
 				if !nextScheduledDate.After(xpayment.date) {
 					fmt.Printf("Last Payment date (%v) is after the chosen next date (%v)", xpayment.date, nextScheduledDate)
