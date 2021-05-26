@@ -14,15 +14,17 @@ const (
 	debtApiServer        string = "https://my-json-server.typicode.com/druska/trueaccord-mock-payments-api/debts"
 	paymentPlanApiServer string = "https://my-json-server.typicode.com/druska/trueaccord-mock-payments-api/payment_plans"
 	paymentsApiServer    string = "https://my-json-server.typicode.com/druska/trueaccord-mock-payments-api/payments"
+	isoLayout            string = "2006-01-02"
 )
 
 type Debt struct {
-	ID              int             `json:"id"`
-	Amount          decimal.Decimal `json:"amount"`
-	InPaymentPlan   bool            `json:"is_in_payment_plan,omitempty"`
-	RemainingAmount decimal.Decimal `json:"remaining_amount,omitempty"`
-	NextPaymentDate string          `json:"next_payment_due_date,omitempty"`
-	paymentPlan     PaymentPlan
+	ID                        int             `json:"id"`
+	Amount                    decimal.Decimal `json:"amount"`
+	InPaymentPlan             bool            `json:"is_in_payment_plan,omitempty"`
+	RemainingAmount           decimal.Decimal `json:"remaining_amount,omitempty"`
+	remainingAmountCalculated bool
+	NextPaymentDate           string `json:"next_payment_due_date,omitempty"`
+	paymentPlan               *PaymentPlan
 }
 
 type PaymentPlan struct {
@@ -32,14 +34,15 @@ type PaymentPlan struct {
 	InstallmentFrequency string          `json:"installment_frequency"`
 	InstallmentAmount    decimal.Decimal `json:"installment_amount"`
 	StartDate            string          `json:"start_date"`
-	startDateValue       time.Time       `json:"start_date_value,omitempty"`
+	startDate            time.Time       //  The date converted to golang date format
 	payments             []Payment
 }
 
 type Payment struct {
-	Amount        float64 `json:"amount"`
-	Date          string  `json:"date"`
-	PaymentPlanID int     `json:"payment_plan_id"`
+	Amount        decimal.Decimal `json:"amount"`
+	Date          string          `json:"date"`
+	date          time.Time       //  The date converted to golang date format
+	PaymentPlanID int             `json:"payment_plan_id"`
 }
 
 //  Used to grab results and error codes from the goroutine which
@@ -59,7 +62,7 @@ type PaymentPlansReturn struct {
 //  Used to grab results and error codes from the goroutine which
 //  retrieves Payments from the web-service
 type PaymentsReturn struct {
-	payments map[int]Payment
+	payments []Payment
 	err      error
 }
 
@@ -68,7 +71,7 @@ func main() {
 	var debts map[int]Debt
 
 	//  Populate the debts structure which includes debts, plans and payments
-	err := populateDebts(debts)
+	err := populateDebtHierarchy(debts)
 
 	if err != nil {
 		fmt.Printf("Error populating debts:%v", err)
@@ -77,7 +80,17 @@ func main() {
 	return
 }
 
-func populateDebts(debts map[int]Debt) error {
+//  return a graph of the data returned from the service calls.
+//  I'm aware of the memory implications of this, but the
+//  the services operations are currently designed (specifically, we get the
+//  entirety of a result-set with each call, rather than being able
+//  to load by id or specify a subset), we are left with two choices:
+//  1. Make multiple cascading "retrieve all" calls to the services for each debt,
+//  payment. This would quickly saturate the service infrastructure with any sort
+//  of volume in production and generally would be quite gnarly.
+//  2. Cache all our entries locally in memory.
+//  Obviously, we chose option 2
+func populateDebtHierarchy(debts map[int]Debt) error {
 	var err error = nil
 
 	var debtsChannel chan DebtsReturn = nil
@@ -89,12 +102,12 @@ func populateDebts(debts map[int]Debt) error {
 	paymentPlanChannel = make(chan PaymentPlansReturn)
 	paymentsChannel = make(chan PaymentsReturn)
 
-	go pullDebts(debtsChannel, debtApiServer)
-	go pullPaymentPlans(paymentPlanChannel, paymentPlanApiServer)
-	go pullPayments(paymentsChannel, paymentsApiServer)
+	go retrieveDebts(debtsChannel, debtApiServer)
+	go retrievePaymentPlans(paymentPlanChannel, paymentPlanApiServer)
+	go retrievePayments(paymentsChannel, paymentsApiServer)
 
 	var plans map[int]PaymentPlan
-	var payments map[int]Payment
+	var payments []Payment
 
 	//  I didn't use a waitgroup here because I need a timeout
 	for timedOut := false; waitCount < 3 && timedOut != true; {
@@ -153,7 +166,7 @@ func populateDebts(debts map[int]Debt) error {
 	return err
 }
 
-func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payments map[int]Payment) error {
+func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payments []Payment) error {
 	var err error = nil
 	for debtId, debt := range debts {
 
@@ -161,7 +174,7 @@ func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payment
 		plan, ok := paymentPlans[debtId]
 
 		if ok {
-			debt.paymentPlan = plan
+			debt.paymentPlan = &plan
 
 			//  remove it from the map since we don't need it broken out anymore.
 			//  Besides, we shall do some data integrity checking at the end to
@@ -175,27 +188,15 @@ func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payment
 			//  given payment plan
 			var tempPayments []Payment
 
-			//  We will use this slice to keep track of payments that have been added to a plan
-			//  that we can remove from our payments collection
-			var paymentDeletions []int
-
 			//  Iterate through all the payments, matching the payments by plan id
 			//  to their owner plans
-			for pid, payment := range payments {
-				if payment.PaymentPlanID == planId {
-					tempPayments = append(tempPayments, payment)
-					paymentDeletions = append(paymentDeletions, pid)
+			for _, pmt := range payments {
+				if pmt.PaymentPlanID == planId {
+					tempPayments = append(tempPayments, pmt)
 				}
-
 			}
 			//  Store those payments in the plan
 			debt.paymentPlan.payments = tempPayments
-
-			//  Now delete the loose payments that we've already associated
-			//  with a payment plan
-			for _, pid := range paymentDeletions {
-				delete(payments, pid)
-			}
 		} // end if ok
 		//  Store the modified debt object back in the collection
 		debts[debtId] = debt
@@ -206,14 +207,11 @@ func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payment
 		//  in a production system these would show up in an exception report.
 		err = fmt.Errorf("Found orphaned payment plans")
 	}
-	if len(payments) > 1 {
-		//  ditto on the exception report here
-		err = fmt.Errorf("Found orphaned payments")
-	}
+
 	return err
 }
 
-func pullPayments(results chan PaymentsReturn, serverUri string) {
+func retrievePayments(results chan PaymentsReturn, serverUri string) {
 	var rvalue PaymentsReturn
 	var err error = nil
 	var resp *http.Response = nil
@@ -233,6 +231,7 @@ func pullPayments(results chan PaymentsReturn, serverUri string) {
 	}
 	req.Header.Add("Accept", "application/json")
 	req.Header.Add("Content-type", "application/json")
+	req.Header.Add("Connection", "keep-alive")
 
 	resp, err = client.Do(req)
 	if err != nil || resp == nil {
@@ -277,16 +276,24 @@ func pullPayments(results chan PaymentsReturn, serverUri string) {
 		results <- rvalue
 		return
 	}
-	//  Now turn those into a map and return
-	rvalue.payments = make(map[int]Payment)
 
 	for _, pmt := range paymentsList {
-		rvalue.payments[pmt.PaymentPlanID] = pmt
+		if len(pmt.Date) > 0 {
+			pmt.date, err = time.Parse(isoLayout, pmt.Date)
+
+			if err != nil {
+				rvalue.err = err
+				results <- rvalue
+				return
+			}
+		}
+
+		rvalue.payments = append(rvalue.payments, pmt)
 	}
 	results <- rvalue
 }
 
-func pullDebts(results chan DebtsReturn, serverUri string) {
+func retrieveDebts(results chan DebtsReturn, serverUri string) {
 	var rvalue DebtsReturn
 	var err error = nil
 	var resp *http.Response = nil
@@ -306,6 +313,7 @@ func pullDebts(results chan DebtsReturn, serverUri string) {
 	}
 	req.Header.Add("Accept", "application/json")
 	req.Header.Add("Content-type", "application/json")
+	req.Header.Add("Connection", "keep-alive")
 
 	resp, err = client.Do(req)
 	if err != nil || resp == nil {
@@ -360,7 +368,7 @@ func pullDebts(results chan DebtsReturn, serverUri string) {
 	results <- rvalue
 }
 
-func pullPaymentPlans(results chan PaymentPlansReturn, serverUri string) {
+func retrievePaymentPlans(results chan PaymentPlansReturn, serverUri string) {
 	var rvalue PaymentPlansReturn
 	var err error = nil
 	var resp *http.Response = nil
@@ -380,6 +388,7 @@ func pullPaymentPlans(results chan PaymentPlansReturn, serverUri string) {
 	}
 	req.Header.Add("Accept", "application/json")
 	req.Header.Add("Content-type", "application/json")
+	req.Header.Add("Connection", "keep-alive")
 
 	resp, err = client.Do(req)
 	if err != nil || resp == nil {
@@ -424,31 +433,92 @@ func pullPaymentPlans(results chan PaymentPlansReturn, serverUri string) {
 		results <- rvalue
 		return
 	}
+
 	//  Now turn those into a map and return
 	rvalue.paymentPlans = make(map[int]PaymentPlan)
 
 	//  Use the Debt-id as a key since we're going to have to perform lookups based on that
 	for _, plan := range paymentPlans {
-		rvalue.paymentPlans[plan.DebtID] = plan
+
+		//  While we're at it, parse the dates..
+		if len(plan.StartDate) > 0 {
+			plan.startDate, err = time.Parse(isoLayout, plan.StartDate)
+
+			if err != nil {
+				rvalue.err = err
+				results <- rvalue
+				return
+			}
+		}
+
+		if err == nil {
+			rvalue.paymentPlans[plan.DebtID] = plan
+		}
 	}
 
 	results <- rvalue
 }
 
-func transformDebtObjects(debts map[int]Debt) error {
-	var err error = nil
+func (debt *Debt) sumTotalPayments() decimal.Decimal {
+	var rvalue decimal.Decimal
+	if debt.paymentPlan != nil {
 
-	//  Iterate through each debt object, calculating
+		plan := debt.paymentPlan
 
-	return err
-}
-
-func IsPaymentPlanActive(debt *Debt, plan *PaymentPlan) bool {
-	rc := false
-
-	if debt != nil && plan != nil {
-
+		if plan.payments != nil {
+			for _, payment := range plan.payments {
+				rvalue.Add(payment.Amount)
+			}
+		}
 	}
 
+	return rvalue
+}
+
+func (debt *Debt) IsPaidOff() bool {
+	rc := false
+	if !debt.remainingAmountCalculated {
+		debt.CalculateRemainingAmount(true)
+	}
+	//  Check for zero or negative. It's possible they over-paid
+	if debt.RemainingAmount.IsZero() || debt.RemainingAmount.IsNegative() {
+		rc = true
+	}
+	return rc
+}
+
+func (debt *Debt) CalculateRemainingAmount(updateObject bool) decimal.Decimal {
+	var rvalue decimal.Decimal
+
+	//  See how much has been paid, if anything
+	amountPaid := debt.sumTotalPayments()
+
+	//  Start by the setting to the debt's amount
+	rvalue = debt.Amount
+
+	//  If there's a payment plan, use the amount_to_pay from there
+	if debt.paymentPlan != nil {
+		rvalue = debt.paymentPlan.AmountToPay
+	}
+
+	//  Now set the remaining amount on the object
+	rvalue = rvalue.Sub(amountPaid)
+
+	if updateObject {
+		debt.remainingAmountCalculated = true
+		debt.RemainingAmount = rvalue
+	}
+	return rvalue
+}
+
+func (debt *Debt) isPaymentPlanActive() bool {
+	rc := false
+
+	if debt.paymentPlan != nil {
+
+		if !debt.IsPaidOff() {
+			rc = true
+		}
+	}
 	return rc
 }
