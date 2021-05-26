@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -23,7 +24,7 @@ type Debt struct {
 	InPaymentPlan             bool            `json:"is_in_payment_plan,omitempty"`
 	RemainingAmount           decimal.Decimal `json:"remaining_amount,omitempty"`
 	remainingAmountCalculated bool
-	NextPaymentDate           string `json:"next_payment_due_date,omitempty"`
+	NextPaymentDate           *string `json:"next_payment_due_date,omitempty"`
 	paymentPlan               *PaymentPlan
 }
 
@@ -287,9 +288,11 @@ func retrievePayments(results chan PaymentsReturn, serverUri string) {
 				return
 			}
 		}
-
 		rvalue.payments = append(rvalue.payments, pmt)
+
 	}
+	//  Sort the payments by date to make our lives easier later
+	sort.Slice(rvalue.payments, func(i, j int) bool { return rvalue.payments[i].date.Before(rvalue.payments[j].date) })
 	results <- rvalue
 }
 
