@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -16,7 +18,20 @@ const (
 	paymentPlanApiServer string = "https://my-json-server.typicode.com/druska/trueaccord-mock-payments-api/payment_plans"
 	paymentsApiServer    string = "https://my-json-server.typicode.com/druska/trueaccord-mock-payments-api/payments"
 	isoLayout            string = "2006-01-02"
+	weekly               string = "weekly"
+	biweekly             string = "bi_weekly"
+	gracePeriodInDays    int    = 3
 )
+
+var (
+	hoursInADay         time.Duration
+	gracePeriodDuration time.Duration
+)
+
+func init() {
+	hoursInADay, _ = time.ParseDuration("24h")
+	gracePeriodDuration, _ = time.ParseDuration("120h")
+}
 
 type Debt struct {
 	ID                        int             `json:"id"`
@@ -68,11 +83,12 @@ type PaymentsReturn struct {
 }
 
 func main() {
+	var err error = nil
 
 	var debts map[int]Debt
 
 	//  Populate the debts structure which includes debts, plans and payments
-	err := populateDebtHierarchy(debts)
+	err = populateDebtHierarchy(debts)
 
 	if err != nil {
 		fmt.Printf("Error populating debts:%v", err)
@@ -198,6 +214,12 @@ func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payment
 			}
 			//  Store those payments in the plan
 			debt.paymentPlan.payments = tempPayments
+
+			//
+			debt.calculateNextPaymentDate(true)
+
+			fmt.Println("=================================================")
+			fmt.Println("=================================================")
 		} // end if ok
 		//  Store the modified debt object back in the collection
 		debts[debtId] = debt
@@ -470,15 +492,17 @@ func (debt *Debt) sumTotalPayments() decimal.Decimal {
 
 		if plan.payments != nil {
 			for _, payment := range plan.payments {
-				rvalue.Add(payment.Amount)
+				fmt.Printf("Adding payment amount of %v to paid total (%v)\n", payment.Amount, rvalue)
+				rvalue = rvalue.Add(payment.Amount)
 			}
 		}
 	}
 
+	fmt.Printf("Total payments received:%v\n", rvalue)
 	return rvalue
 }
 
-func (debt *Debt) IsPaidOff() bool {
+func (debt *Debt) isDebtPaidOff() bool {
 	rc := false
 	if !debt.remainingAmountCalculated {
 		debt.CalculateRemainingAmount(true)
@@ -496,16 +520,28 @@ func (debt *Debt) CalculateRemainingAmount(updateObject bool) decimal.Decimal {
 	//  See how much has been paid, if anything
 	amountPaid := debt.sumTotalPayments()
 
+	fmt.Printf("Paid %v in payments\n", amountPaid)
+
 	//  Start by the setting to the debt's amount
 	rvalue = debt.Amount
 
+	fmt.Printf("Initial debt is %v\n", rvalue)
+
 	//  If there's a payment plan, use the amount_to_pay from there
 	if debt.paymentPlan != nil {
+		fmt.Printf("Changing outstanding debt from %v to %v due to payment plan\n", rvalue, debt.paymentPlan.AmountToPay)
 		rvalue = debt.paymentPlan.AmountToPay
 	}
 
+	fmt.Printf("Subtracting %v from %v\n", amountPaid, rvalue)
 	//  Now set the remaining amount on the object
 	rvalue = rvalue.Sub(amountPaid)
+
+	if rvalue.IsNegative() {
+		fmt.Printf("We owe the customer:%v\n", rvalue.Abs())
+	} else {
+		fmt.Printf("After adjustments, the outstanding debt is %v\n", rvalue)
+	}
 
 	if updateObject {
 		debt.remainingAmountCalculated = true
@@ -518,10 +554,147 @@ func (debt *Debt) isPaymentPlanActive() bool {
 	rc := false
 
 	if debt.paymentPlan != nil {
-
-		if !debt.IsPaidOff() {
+		if !debt.isDebtPaidOff() {
 			rc = true
 		}
+	}
+	return rc
+}
+
+//  We have a potentially nasty set of problems related to matching up scheduled payment
+//  dates with actual dates and amounts:
+//  1. Given the data provided, we are missing the original scheduled payoff date, so we
+//      can't work backwards from that.
+//  2. Given the data provided, we are also missing the original debt amount, which
+//      in conjunction with remaining_amount, we might have used to infer a payment schedule
+//  3. As mentioned in the spec, the customer could have made random payments that are not on schedule
+//  4. Valid scheduled payments may not have posted on their scheduled dates
+//  Given those problems, we're going to make a couple of assumptions:
+//  i. A payment that falls within a certain number of days of a payment date will count
+//      as a scheduled payment. We are going to call that a grace period, and is defined
+//      as the constant 'gracePeriodInDays' at the top of a program.
+func (debt *Debt) calculateNextPaymentDate(updateObject bool) string {
+	var nextPaymentDate string
+
+	//  First make sure a payment plan is active
+	if debt.isPaymentPlanActive() {
+		//  Does this debt have any outstanding payments?
+		paymentCount := len(debt.paymentPlan.payments)
+		if paymentCount > 0 {
+			var lastValidDate time.Time
+
+			//  Starting with most recent payment made and working backwards,
+			//  Grab the last payment that was made and then add the payment period
+			for i := paymentCount - 1; i >= 0 && lastValidDate.IsZero(); i-- {
+				pmt := debt.paymentPlan.payments[i]
+
+				fmt.Printf("Examining payment of $%v that occurred on %v\n", pmt.Amount, pmt.date)
+				lastScheduledPaymentDate, err := debt.lastPaymentDateNotExceedingDate(pmt.date)
+				fmt.Printf("The last payment was scheduled on %v\n", lastScheduledPaymentDate)
+
+				if lastScheduledPaymentDate.Before(pmt.date) {
+
+					fmt.Printf("Strange error calculating date. Start Date is %v, Payment date is %v, Next Calculated Date is %v\n",
+						debt.paymentPlan.startDate, pmt.date, lastScheduledPaymentDate)
+					tempLastDate, _ := debt.lastPaymentDateNotExceedingDate(pmt.date)
+
+					fmt.Printf("Weird error:%v", tempLastDate)
+				}
+
+				//  If one of those failed, I don't know what to tell ya'...
+				if err != nil || lastScheduledPaymentDate.IsZero() {
+					return nextPaymentDate
+				} else {
+					d, tempErr := paymentFrequencyAsDuration(debt.paymentPlan.InstallmentFrequency)
+
+					if tempErr != nil {
+						return nextPaymentDate
+					}
+
+					//  Add the duration to the schedule
+					lastValidDate = lastScheduledPaymentDate.Add(d)
+				}
+			}
+
+			if !lastValidDate.IsZero() {
+				nextPaymentDate = lastValidDate.String()
+			}
+		}
+	}
+
+	if updateObject && len(nextPaymentDate) > 0 {
+		debt.NextPaymentDate = &nextPaymentDate
+	}
+
+	fmt.Printf("Next payment date:%v\n", nextPaymentDate)
+
+	return nextPaymentDate
+}
+func paymentFrequencyAsDuration(freq string) (time.Duration, error) {
+	var rvalue time.Duration
+	var err error = nil
+	var frequency string
+	var dayAddValue int
+
+	frequency = strings.ToLower(freq)
+
+	switch frequency {
+	case weekly:
+		dayAddValue = 7
+		break
+
+	case biweekly:
+		dayAddValue = 14
+		break
+	default:
+		//  punt if we got something unexpected
+		return rvalue, fmt.Errorf("Received unexpected value of %v in payment frequency", freq)
+	}
+
+	rvalue, err = time.ParseDuration(fmt.Sprintf("%vh", 24*dayAddValue))
+
+	return rvalue, err
+}
+
+func (debt *Debt) lastPaymentDateNotExceedingDate(date time.Time) (time.Time, error) {
+	var rvalue time.Time
+	var err error = nil
+
+	if debt.isPaymentPlanActive() {
+		var last time.Time
+		var current time.Time
+
+		var frequencyDuration time.Duration
+
+		frequencyDuration, err = paymentFrequencyAsDuration(debt.paymentPlan.InstallmentFrequency)
+
+		fmt.Printf("Calculated payment frequency duration of %v\n", frequencyDuration)
+
+		last = debt.paymentPlan.startDate
+		current = last
+
+		for current.Before(date) {
+			fmt.Printf("Start:%v, Listed Payment Date:%v, Current:%v, Last:%v\n********\n", debt.paymentPlan.startDate, date, current, last)
+			//  Add days to hit the next payment cycle point
+			current = current.Add(frequencyDuration)
+
+			if current.After(date) {
+				break
+			}
+			last = current
+		}
+		rvalue = current
+	}
+	return rvalue, err
+}
+
+func datesWithinGracePeriodRange(t1 time.Time, t2 time.Time) bool {
+	rc := false
+
+	d := t1.Sub(t2)
+
+	if math.Abs(float64(d)) <= float64(gracePeriodDuration) {
+		rc = true
 	}
 	return rc
 }
