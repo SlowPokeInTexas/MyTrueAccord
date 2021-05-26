@@ -31,15 +31,17 @@ var (
 func init() {
 	hoursInADay, _ = time.ParseDuration("24h")
 	gracePeriodDuration, _ = time.ParseDuration("120h")
+	//  We want our decimals to be marshalled/unmarshalled without quotes, thank you very much
+	decimal.MarshalJSONWithoutQuotes = true
 }
 
 type Debt struct {
 	ID                        int             `json:"id"`
 	Amount                    decimal.Decimal `json:"amount"`
-	InPaymentPlan             bool            `json:"is_in_payment_plan,omitempty"`
-	RemainingAmount           decimal.Decimal `json:"remaining_amount,omitempty"`
+	InPaymentPlan             bool            `json:"is_in_payment_plan"`
+	RemainingAmount           decimal.Decimal `json:"remaining_amount"`
 	remainingAmountCalculated bool
-	NextPaymentDate           *string `json:"next_payment_due_date,omitempty"`
+	NextPaymentDate           *string `json:"next_payment_due_date"`
 	paymentPlan               *PaymentPlan
 }
 
@@ -87,13 +89,33 @@ func main() {
 
 	var debts map[int]Debt
 
+	var debtList []Debt
+
 	//  Populate the debts structure which includes debts, plans and payments
-	err = populateDebtHierarchy(debts)
+	err = populateDebtHierarchy(&debts)
 
 	if err != nil {
 		fmt.Printf("Error populating debts:%v", err)
 		return
 	}
+
+	debtList = make([]Debt, len(debts))
+
+	idx := 0
+
+	for _, debt := range debts {
+		debtList[idx] = debt
+		idx++
+	}
+
+	bytes, tempError := json.MarshalIndent(debtList, "", "   ")
+
+	if tempError != nil {
+		fmt.Printf("Error marshalling output:%v", tempError)
+	} else {
+		fmt.Printf("%v\n", string(bytes))
+	}
+
 	return
 }
 
@@ -107,7 +129,7 @@ func main() {
 //  of volume in production and generally would be quite gnarly.
 //  2. Cache all our entries locally in memory.
 //  Obviously, we chose option 2
-func populateDebtHierarchy(debts map[int]Debt) error {
+func populateDebtHierarchy(debts *map[int]Debt) error {
 	var err error = nil
 
 	var debtsChannel chan DebtsReturn = nil
@@ -132,7 +154,7 @@ func populateDebtHierarchy(debts map[int]Debt) error {
 		case debtWrapper := <-debtsChannel:
 			waitCount++
 			if debtWrapper.err == nil {
-				debts = debtWrapper.debts
+				*debts = debtWrapper.debts
 			} else {
 				fmt.Errorf("Error encountered retrieving or parsing Debts:%v", debtWrapper.err)
 			}
@@ -174,7 +196,7 @@ func populateDebtHierarchy(debts map[int]Debt) error {
 	}
 
 	//  Since all this ends up being hierarchical anyway, let's make it a graph
-	err = unflattenData(debts, plans, payments)
+	err = normalizeData(*debts, plans, payments)
 
 	if err != nil {
 		return fmt.Errorf("Unexpected error encountered flattening data:%v", err)
@@ -183,7 +205,7 @@ func populateDebtHierarchy(debts map[int]Debt) error {
 	return err
 }
 
-func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payments []Payment) error {
+func normalizeData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payments []Payment) error {
 	var err error = nil
 	for debtId, debt := range debts {
 
@@ -218,8 +240,8 @@ func unflattenData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payment
 			//
 			debt.calculateNextPaymentDate(true)
 
-			fmt.Println("=================================================")
-			fmt.Println("=================================================")
+			debt.InPaymentPlan = debt.isPaymentPlanActive()
+
 		} // end if ok
 		//  Store the modified debt object back in the collection
 		debts[debtId] = debt
@@ -484,22 +506,23 @@ func retrievePaymentPlans(results chan PaymentPlansReturn, serverUri string) {
 	results <- rvalue
 }
 
-func (debt *Debt) sumTotalPayments() decimal.Decimal {
+func (debt *Debt) sumTotalPayments() (decimal.Decimal, int) {
 	var rvalue decimal.Decimal
+	var paymentCount int
+
 	if debt.paymentPlan != nil {
 
 		plan := debt.paymentPlan
 
 		if plan.payments != nil {
 			for _, payment := range plan.payments {
-				fmt.Printf("Adding payment amount of %v to paid total (%v)\n", payment.Amount, rvalue)
-				rvalue = rvalue.Add(payment.Amount)
+				paymentCount++
+				rvalue = rvalue.Add(payment.Amount).Round(2)
 			}
 		}
 	}
 
-	fmt.Printf("Total payments received:%v\n", rvalue)
-	return rvalue
+	return rvalue, paymentCount
 }
 
 func (debt *Debt) isDebtPaidOff() bool {
@@ -518,31 +541,20 @@ func (debt *Debt) CalculateRemainingAmount(updateObject bool) decimal.Decimal {
 	var rvalue decimal.Decimal
 
 	//  See how much has been paid, if anything
-	amountPaid := debt.sumTotalPayments()
-
-	fmt.Printf("Paid %v in payments\n", amountPaid)
+	amountPaid, _ := debt.sumTotalPayments()
 
 	//  Start by the setting to the debt's amount
 	rvalue = debt.Amount
 
-	fmt.Printf("Initial debt is %v\n", rvalue)
-
 	//  If there's a payment plan, use the amount_to_pay from there
 	if debt.paymentPlan != nil {
-		fmt.Printf("Changing outstanding debt from %v to %v due to payment plan\n", rvalue, debt.paymentPlan.AmountToPay)
-		rvalue = debt.paymentPlan.AmountToPay
+		if !debt.paymentPlan.AmountToPay.Equal(debt.Amount) {
+			rvalue = debt.paymentPlan.AmountToPay
+		}
 	}
 
-	fmt.Printf("Subtracting %v from %v\n", amountPaid, rvalue)
 	//  Now set the remaining amount on the object
-	rvalue = rvalue.Sub(amountPaid)
-
-	if rvalue.IsNegative() {
-		fmt.Printf("We owe the customer:%v\n", rvalue.Abs())
-	} else {
-		fmt.Printf("After adjustments, the outstanding debt is %v\n", rvalue)
-	}
-
+	rvalue = rvalue.Sub(amountPaid).Round(2)
 	if updateObject {
 		debt.remainingAmountCalculated = true
 		debt.RemainingAmount = rvalue
@@ -581,25 +593,16 @@ func (debt *Debt) calculateNextPaymentDate(updateObject bool) string {
 		//  Does this debt have any outstanding payments?
 		paymentCount := len(debt.paymentPlan.payments)
 		if paymentCount > 0 {
-			var lastValidDate time.Time
+			var nextScheduledDate time.Time
+
+			var xpayment Payment
 
 			//  Starting with most recent payment made and working backwards,
 			//  Grab the last payment that was made and then add the payment period
-			for i := paymentCount - 1; i >= 0 && lastValidDate.IsZero(); i-- {
+			for i := paymentCount - 1; i >= 0 && nextScheduledDate.IsZero(); i-- {
 				pmt := debt.paymentPlan.payments[i]
 
-				fmt.Printf("Examining payment of $%v that occurred on %v\n", pmt.Amount, pmt.date)
-				lastScheduledPaymentDate, err := debt.lastPaymentDateNotExceedingDate(pmt.date)
-				fmt.Printf("The last payment was scheduled on %v\n", lastScheduledPaymentDate)
-
-				if lastScheduledPaymentDate.Before(pmt.date) {
-
-					fmt.Printf("Strange error calculating date. Start Date is %v, Payment date is %v, Next Calculated Date is %v\n",
-						debt.paymentPlan.startDate, pmt.date, lastScheduledPaymentDate)
-					tempLastDate, _ := debt.lastPaymentDateNotExceedingDate(pmt.date)
-
-					fmt.Printf("Weird error:%v", tempLastDate)
-				}
+				lastScheduledPaymentDate, err := debt.lastScheduledDateNotExceedingPaymentDate(pmt.date)
 
 				//  If one of those failed, I don't know what to tell ya'...
 				if err != nil || lastScheduledPaymentDate.IsZero() {
@@ -612,12 +615,17 @@ func (debt *Debt) calculateNextPaymentDate(updateObject bool) string {
 					}
 
 					//  Add the duration to the schedule
-					lastValidDate = lastScheduledPaymentDate.Add(d)
+					nextScheduledDate = lastScheduledPaymentDate.Add(d)
+					xpayment = pmt
 				}
 			}
 
-			if !lastValidDate.IsZero() {
-				nextPaymentDate = lastValidDate.String()
+			if !nextScheduledDate.IsZero() {
+				nextPaymentDate = nextScheduledDate.String()
+
+				if !nextScheduledDate.After(xpayment.date) {
+					fmt.Printf("Last Payment date (%v) is after the chosen next date (%v)", xpayment.date, nextScheduledDate)
+				}
 			}
 		}
 	}
@@ -625,8 +633,6 @@ func (debt *Debt) calculateNextPaymentDate(updateObject bool) string {
 	if updateObject && len(nextPaymentDate) > 0 {
 		debt.NextPaymentDate = &nextPaymentDate
 	}
-
-	fmt.Printf("Next payment date:%v\n", nextPaymentDate)
 
 	return nextPaymentDate
 }
@@ -636,6 +642,7 @@ func paymentFrequencyAsDuration(freq string) (time.Duration, error) {
 	var frequency string
 	var dayAddValue int
 
+	//  Normalize our comparison to lowercase; you never know what those Scala services are up to 😁
 	frequency = strings.ToLower(freq)
 
 	switch frequency {
@@ -656,35 +663,39 @@ func paymentFrequencyAsDuration(freq string) (time.Duration, error) {
 	return rvalue, err
 }
 
-func (debt *Debt) lastPaymentDateNotExceedingDate(date time.Time) (time.Time, error) {
+func (debt *Debt) lastScheduledDateNotExceedingPaymentDate(date time.Time) (time.Time, error) {
 	var rvalue time.Time
 	var err error = nil
 
 	if debt.isPaymentPlanActive() {
-		var last time.Time
 		var current time.Time
+		var last time.Time
 
 		var frequencyDuration time.Duration
 
 		frequencyDuration, err = paymentFrequencyAsDuration(debt.paymentPlan.InstallmentFrequency)
 
-		fmt.Printf("Calculated payment frequency duration of %v\n", frequencyDuration)
-
-		last = debt.paymentPlan.startDate
-		current = last
+		current = debt.paymentPlan.startDate
+		last = current
 
 		for current.Before(date) {
-			fmt.Printf("Start:%v, Listed Payment Date:%v, Current:%v, Last:%v\n********\n", debt.paymentPlan.startDate, date, current, last)
 			//  Add days to hit the next payment cycle point
 			current = current.Add(frequencyDuration)
 
-			if current.After(date) {
+			//  if the current date is after the payment date, break...
+			if current.After(date) || current == date {
 				break
 			}
 			last = current
 		}
-		rvalue = current
+
+		if current == date {
+			rvalue = current
+		} else {
+			rvalue = last
+		}
 	}
+
 	return rvalue, err
 }
 
