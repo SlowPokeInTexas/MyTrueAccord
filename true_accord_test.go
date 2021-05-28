@@ -1,7 +1,6 @@
 package main
 
 import (
-	"reflect"
 	"testing"
 	"time"
 	_ "unicode"
@@ -57,6 +56,7 @@ func getRawTestObjects() (debtTestData map[int]Debt, paymentPlanTestData map[int
 		{PaymentPlanID: 2, Amount: decimal.NewFromInt(1000), Date: "2020-06-02"},       //  Try two payments on the same unscheduled date
 		{PaymentPlanID: 2, Amount: decimal.NewFromFloat(1000.36), Date: "2020-06-28"},  //  Folow-up with two payments on scheduled date
 		{PaymentPlanID: 2, Amount: decimal.NewFromFloat(1500.77), Date: "2020-06-28"},  //  Folow-up with two payments on schedule date
+		{PaymentPlanID: 2, Amount: decimal.NewFromFloat(1500.55), Date: "2020-06-29"},  //  Folow-up with two payments on schedule date
 		{PaymentPlanID: 2, Amount: decimal.NewFromFloat(10000.71), Date: "2021-04-01"}, //  Wait several months then make whopping payment
 
 		{PaymentPlanID: 3, Amount: decimal.NewFromFloat(25), Date: "2020-11-03"},
@@ -192,6 +192,7 @@ func TestDebt_calculateNextPaymentDate(t *testing.T) {
 
 	//  Test for date that occurs before plan begins. This should never happen,
 	//  but lots of things should never happen but do.
+	t.Logf("Checking the next scheduled date when payments occur before the start date")
 	debt := debts[11]
 	dateString = debt.calculateNextPaymentDate(false)
 	got, err = time.Parse(isoLayout, dateString)
@@ -203,336 +204,58 @@ func TestDebt_calculateNextPaymentDate(t *testing.T) {
 		t.Errorf("Got:%v but wanted %v", got, want)
 	}
 
-	/*
-		type fields struct {
-			ID                        int
-			Amount                    decimal.Decimal
-			InPaymentPlan             bool
-			RemainingAmount           decimal.Decimal
-			remainingAmountCalculated bool
-			NextPaymentDate           *string
-			paymentPlan               *PaymentPlan
-		}
-		type args struct {
-			updateObject bool
-		}
-		tests := []struct {
-			name   string
-			fields fields
-			args   args
-			want   string
-		}{
-			// TODO: Add test cases.
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				debt := &Debt{
-					ID:                        tt.fields.ID,
-					Amount:                    tt.fields.Amount,
-					InPaymentPlan:             tt.fields.InPaymentPlan,
-					RemainingAmount:           tt.fields.RemainingAmount,
-					remainingAmountCalculated: tt.fields.remainingAmountCalculated,
-					NextPaymentDate:           tt.fields.NextPaymentDate,
-					paymentPlan:               tt.fields.paymentPlan,
-				}
-				if got := debt.calculateNextPaymentDate(tt.args.updateObject); got != tt.want {
-					t.Errorf("calculateNextPaymentDate() = %v, want %v", got, tt.want)
-				}
-			})
-		}*/
+	t.Logf("Trying to confuse the next-date algorithm")
+	debt = debts[2]
+	dateString = debt.calculateNextPaymentDate(false)
+	got, err = time.Parse(isoLayout, dateString)
+	if err != nil {
+		t.Errorf("calculateNextPaymentDate() error parsing date returned from calculateNextPaymentDate (%v):%v", dateString, err)
+	}
+	want, err = time.Parse(isoLayout, "2021-04-15")
+	if got != want {
+		t.Errorf("Got:%v but wanted %v", got, want)
+	}
+
+	t.Logf("Checking no payments made on correct date")
+	debt = debts[3]
+	dateString = debt.calculateNextPaymentDate(false)
+	got, err = time.Parse(isoLayout, dateString)
+	if err != nil {
+		t.Errorf("calculateNextPaymentDate() error parsing date returned from calculateNextPaymentDate (%v):%v", dateString, err)
+	}
+	want, err = time.Parse(isoLayout, "2021-01-06")
+	if got != want {
+		t.Errorf("Got:%v but wanted %v", got, want)
+	}
 }
 
 func TestDebt_isDebtPaidOff(t *testing.T) {
-	type fields struct {
-		ID                        int
-		Amount                    decimal.Decimal
-		InPaymentPlan             bool
-		RemainingAmount           decimal.Decimal
-		remainingAmountCalculated bool
-		NextPaymentDate           *string
-		paymentPlan               *PaymentPlan
-	}
-	tests := []struct {
-		name   string
-		fields fields
-		want   bool
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			debt := &Debt{
-				ID:                        tt.fields.ID,
-				Amount:                    tt.fields.Amount,
-				InPaymentPlan:             tt.fields.InPaymentPlan,
-				RemainingAmount:           tt.fields.RemainingAmount,
-				remainingAmountCalculated: tt.fields.remainingAmountCalculated,
-				NextPaymentDate:           tt.fields.NextPaymentDate,
-				paymentPlan:               tt.fields.paymentPlan,
-			}
-			if got := debt.isDebtPaidOff(); got != tt.want {
-				t.Errorf("isDebtPaidOff() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
+	var debts map[int]Debt
+	var err error = nil
+	var got bool
+	var want bool
 
-func TestDebt_isPaymentPlanActive(t *testing.T) {
-	type fields struct {
-		ID                        int
-		Amount                    decimal.Decimal
-		InPaymentPlan             bool
-		RemainingAmount           decimal.Decimal
-		remainingAmountCalculated bool
-		NextPaymentDate           *string
-		paymentPlan               *PaymentPlan
+	err = makeMockGraph(&debts)
+	if err != nil {
+		t.Errorf("calculateNextPaymentDate(), error making mock data: %v", err)
+		return
 	}
-	tests := []struct {
-		name   string
-		fields fields
-		want   bool
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			debt := &Debt{
-				ID:                        tt.fields.ID,
-				Amount:                    tt.fields.Amount,
-				InPaymentPlan:             tt.fields.InPaymentPlan,
-				RemainingAmount:           tt.fields.RemainingAmount,
-				remainingAmountCalculated: tt.fields.remainingAmountCalculated,
-				NextPaymentDate:           tt.fields.NextPaymentDate,
-				paymentPlan:               tt.fields.paymentPlan,
-			}
-			if got := debt.isPaymentPlanActive(); got != tt.want {
-				t.Errorf("isPaymentPlanActive() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
 
-func TestDebt_lastScheduledDateNotExceedingPaymentDate(t *testing.T) {
-	type fields struct {
-		ID                        int
-		Amount                    decimal.Decimal
-		InPaymentPlan             bool
-		RemainingAmount           decimal.Decimal
-		remainingAmountCalculated bool
-		NextPaymentDate           *string
-		paymentPlan               *PaymentPlan
+	//  Try a debt that should be paid off
+	t.Logf("Checking a debt that should be paid off")
+	debt := debts[9]
+	got = debt.isDebtPaidOff()
+	want = true
+	if got != want {
+		t.Errorf("Testing isDebtPaidOff  Got:%v, Want:%v", got, want)
 	}
-	type args struct {
-		date time.Time
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    time.Time
-		wantErr bool
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			debt := &Debt{
-				ID:                        tt.fields.ID,
-				Amount:                    tt.fields.Amount,
-				InPaymentPlan:             tt.fields.InPaymentPlan,
-				RemainingAmount:           tt.fields.RemainingAmount,
-				remainingAmountCalculated: tt.fields.remainingAmountCalculated,
-				NextPaymentDate:           tt.fields.NextPaymentDate,
-				paymentPlan:               tt.fields.paymentPlan,
-			}
-			got, err := debt.lastScheduledDateNotExceedingPaymentDate(tt.args.date)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("lastScheduledDateNotExceedingPaymentDate() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("lastScheduledDateNotExceedingPaymentDate() got = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
 
-func TestDebt_sumTotalPayments(t *testing.T) {
-	type fields struct {
-		ID                        int
-		Amount                    decimal.Decimal
-		InPaymentPlan             bool
-		RemainingAmount           decimal.Decimal
-		remainingAmountCalculated bool
-		NextPaymentDate           *string
-		paymentPlan               *PaymentPlan
-	}
-	tests := []struct {
-		name   string
-		fields fields
-		want   decimal.Decimal
-		want1  int
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			debt := &Debt{
-				ID:                        tt.fields.ID,
-				Amount:                    tt.fields.Amount,
-				InPaymentPlan:             tt.fields.InPaymentPlan,
-				RemainingAmount:           tt.fields.RemainingAmount,
-				remainingAmountCalculated: tt.fields.remainingAmountCalculated,
-				NextPaymentDate:           tt.fields.NextPaymentDate,
-				paymentPlan:               tt.fields.paymentPlan,
-			}
-			got, got1 := debt.sumTotalPayments()
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("sumTotalPayments() got = %v, want %v", got, tt.want)
-			}
-			if got1 != tt.want1 {
-				t.Errorf("sumTotalPayments() got1 = %v, want %v", got1, tt.want1)
-			}
-		})
-	}
-}
-
-func Test_datesWithinGracePeriodRange(t *testing.T) {
-	type args struct {
-		t1 time.Time
-		t2 time.Time
-	}
-	tests := []struct {
-		name string
-		args args
-		want bool
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := datesWithinGracePeriodRange(tt.args.t1, tt.args.t2); got != tt.want {
-				t.Errorf("datesWithinGracePeriodRange() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func Test_normalizeData(t *testing.T) {
-	type args struct {
-		debts        map[int]Debt
-		paymentPlans map[int]PaymentPlan
-		payments     []Payment
-	}
-	tests := []struct {
-		name    string
-		args    args
-		wantErr bool
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := normalizeData(tt.args.debts, tt.args.paymentPlans, tt.args.payments); (err != nil) != tt.wantErr {
-				t.Errorf("normalizeData() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func Test_paymentFrequencyAsDuration(t *testing.T) {
-	type args struct {
-		freq string
-	}
-	tests := []struct {
-		name    string
-		args    args
-		want    time.Duration
-		wantErr bool
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := paymentFrequencyAsDuration(tt.args.freq)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("paymentFrequencyAsDuration() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("paymentFrequencyAsDuration() got = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func Test_populateDebtHierarchy(t *testing.T) {
-	type args struct {
-		debts *map[int]Debt
-	}
-	tests := []struct {
-		name    string
-		args    args
-		wantErr bool
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := populateDebtHierarchy(tt.args.debts); (err != nil) != tt.wantErr {
-				t.Errorf("populateDebtHierarchy() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func Test_retrieveDebts(t *testing.T) {
-	type args struct {
-		results   chan DebtsReturn
-		serverUri string
-	}
-	tests := []struct {
-		name string
-		args args
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-		})
-	}
-}
-
-func Test_retrievePaymentPlans(t *testing.T) {
-	type args struct {
-		results   chan PaymentPlansReturn
-		serverUri string
-	}
-	tests := []struct {
-		name string
-		args args
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-		})
-	}
-}
-
-func Test_retrievePayments(t *testing.T) {
-	type args struct {
-		results   chan PaymentsReturn
-		serverUri string
-	}
-	tests := []struct {
-		name string
-		args args
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-		})
+	//  Try a debt that shouldn't be paid off
+	t.Logf("Checking a debt that should NOT be paid off")
+	debt = debts[6]
+	got = debt.isDebtPaidOff()
+	want = false
+	if got != want {
+		t.Errorf("Testing isDebtPaidOff  Got:%v, Want:%v", got, want)
 	}
 }
