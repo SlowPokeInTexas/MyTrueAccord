@@ -20,16 +20,13 @@ const (
 	isoLayout            string = "2006-01-02"
 	weekly               string = "weekly"
 	biweekly             string = "bi_weekly"
-	gracePeriodInDays    int    = 3
 )
 
 var (
-	hoursInADay         time.Duration
 	gracePeriodDuration time.Duration
 )
 
 func init() {
-	hoursInADay, _ = time.ParseDuration("24h")
 	gracePeriodDuration, _ = time.ParseDuration("120h")
 	//  We want our decimals to be marshalled/unmarshalled without quotes, thank you very much
 	decimal.MarshalJSONWithoutQuotes = true
@@ -126,9 +123,10 @@ func main() {
 	return
 }
 
-//  return a graph of the data returned from the service calls.
-//  I'm aware of the memory implications of this, but the
-//  the services operations are currently designed (specifically, we get the
+//  Make calls to the services to retrieve the related data objects and
+//  return a graph of the data.
+//  I'm aware of the memory implications of this, but as the
+//  services operations are currently designed (specifically, we get the
 //  entirety of a result-set with each call, rather than being able
 //  to load by id or specify a subset), we are left with two choices:
 //  1. Make multiple cascading "retrieve all" calls to the services for each debt,
@@ -505,9 +503,7 @@ func retrievePaymentPlans(results chan PaymentPlansReturn, serverUri string) {
 			}
 		}
 
-		if err == nil {
-			rvalue.paymentPlans[plan.DebtID] = plan
-		}
+		rvalue.paymentPlans[plan.DebtID] = plan
 	}
 
 	results <- rvalue
@@ -535,7 +531,7 @@ func (debt *Debt) sumTotalPayments() (decimal.Decimal, int) {
 func (debt *Debt) isDebtPaidOff() bool {
 	rc := false
 	if !debt.remainingAmountCalculated {
-		debt.CalculateRemainingAmount(true)
+		debt.calculateRemainingAmount(true)
 	}
 	//  Check for zero or negative. It's possible they over-paid
 	if debt.RemainingAmount.IsZero() || debt.RemainingAmount.IsNegative() {
@@ -544,7 +540,7 @@ func (debt *Debt) isDebtPaidOff() bool {
 	return rc
 }
 
-func (debt *Debt) CalculateRemainingAmount(updateObject bool) decimal.Decimal {
+func (debt *Debt) calculateRemainingAmount(updateObject bool) decimal.Decimal {
 	var rvalue decimal.Decimal
 
 	//  See how much has been paid, if anything
@@ -556,7 +552,11 @@ func (debt *Debt) CalculateRemainingAmount(updateObject bool) decimal.Decimal {
 	//  If there's a payment plan, use the amount_to_pay from there
 	if debt.paymentPlan != nil {
 		if !debt.paymentPlan.AmountToPay.Equal(debt.Amount) {
-			rvalue = debt.paymentPlan.AmountToPay
+			//  Add a check for zero; we don't want to completely wipe out their debt
+			//  ..or do we?
+			if !debt.paymentPlan.AmountToPay.IsZero() {
+				rvalue = debt.paymentPlan.AmountToPay
+			}
 		}
 	}
 
