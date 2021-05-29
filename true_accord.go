@@ -17,7 +17,7 @@ const (
 	debtApiServer        string = "https://my-json-server.typicode.com/druska/trueaccord-mock-payments-api/debts"
 	paymentPlanApiServer string = "https://my-json-server.typicode.com/druska/trueaccord-mock-payments-api/payment_plans"
 	paymentsApiServer    string = "https://my-json-server.typicode.com/druska/trueaccord-mock-payments-api/payments"
-	isoLayout            string = "2006-01-02"
+	isoDateLayout        string = "2006-01-02"
 	weekly               string = "weekly"
 	biweekly             string = "bi_weekly"
 )
@@ -51,6 +51,7 @@ type PaymentPlan struct {
 	StartDate            string          `json:"start_date"`
 	startDate            time.Time       //  The date converted to golang date format
 	payments             []Payment
+	schedule             map[time.Time]decimal.Decimal //  Key scheduled payment date, value scheduled balance
 }
 
 type Payment struct {
@@ -58,6 +59,7 @@ type Payment struct {
 	Date          string          `json:"date"`
 	date          time.Time       //  The date converted to golang date format
 	PaymentPlanID int             `json:"payment_plan_id"`
+	scheduled     bool            //    Flag indicating a payment is scheduled
 }
 
 //  Used to grab results and error codes from the goroutine which
@@ -80,13 +82,6 @@ type PaymentsReturn struct {
 	payments []Payment
 	err      error
 }
-
-/*type JSONDate time.Time
-
-func (t JSONDate) MarshalJSON() ([]byte, error) {
-	rvalue := fmt.Sprintf("\"%s\"", time.Time(t).Format(isoLayout))
-	return []byte(rvalue), nil
-}*/
 
 func main() {
 	var err error = nil
@@ -210,6 +205,8 @@ func populateDebtHierarchy(debts *map[int]Debt) error {
 	return err
 }
 
+//  normalizeData takes the disparate objects returned by the various web-service calls and place them
+//  into a nice neat hierarchy, matching paymentPlans to debts and putting payments under payment plans
 func normalizeData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payments []Payment) error {
 	var err error = nil
 	for debtId, debt := range debts {
@@ -242,11 +239,20 @@ func normalizeData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payment
 			//  Store those payments in the plan
 			debt.paymentPlan.payments = tempPayments
 
-			//
-			debt.calculateNextPaymentDate(true)
+			//  Generate a payment schedule based on the parameters,
+			//  which would probably be needed by a UI somewhere anyway
+			debt.paymentPlan.generatePaymentSchedule()
+
+			//  Tag the payments that are scheduled
+			debt.paymentPlan.tagScheduledPayments()
+
+			//  Get the next payment date based on the payments that have
+			//  been made
+			if !debt.isDebtPaidOff() {
+				debt.calculateNextPaymentDate(true)
+			}
 
 			debt.InPaymentPlan = debt.isPaymentPlanActive()
-
 		} // end if ok
 		//  Store the modified debt object back in the collection
 		debts[debtId] = debt
@@ -261,6 +267,7 @@ func normalizeData(debts map[int]Debt, paymentPlans map[int]PaymentPlan, payment
 	return err
 }
 
+//  retrievePayments makes the webservice call to retrieve payments from a debt
 func retrievePayments(results chan PaymentsReturn, serverUri string) {
 	var rvalue PaymentsReturn
 	var err error = nil
@@ -329,7 +336,7 @@ func retrievePayments(results chan PaymentsReturn, serverUri string) {
 
 	for _, pmt := range paymentsList {
 		if len(pmt.Date) > 0 {
-			pmt.date, err = time.Parse(isoLayout, pmt.Date)
+			pmt.date, err = time.Parse(isoDateLayout, pmt.Date)
 
 			if err != nil {
 				rvalue.err = err
@@ -345,6 +352,7 @@ func retrievePayments(results chan PaymentsReturn, serverUri string) {
 	results <- rvalue
 }
 
+//  retrieveDebts makes a webservice call the debts from the server
 func retrieveDebts(results chan DebtsReturn, serverUri string) {
 	var rvalue DebtsReturn
 	var err error = nil
@@ -420,6 +428,7 @@ func retrieveDebts(results chan DebtsReturn, serverUri string) {
 	results <- rvalue
 }
 
+//  retrievePaymentPlans makes the webservice call to retrieve payments from the server
 func retrievePaymentPlans(results chan PaymentPlansReturn, serverUri string) {
 	var rvalue PaymentPlansReturn
 	var err error = nil
@@ -494,7 +503,7 @@ func retrievePaymentPlans(results chan PaymentPlansReturn, serverUri string) {
 
 		//  While we're at it, parse the dates..
 		if len(plan.StartDate) > 0 {
-			plan.startDate, err = time.Parse(isoLayout, plan.StartDate)
+			plan.startDate, err = time.Parse(isoDateLayout, plan.StartDate)
 
 			if err != nil {
 				rvalue.err = err
@@ -509,6 +518,7 @@ func retrievePaymentPlans(results chan PaymentPlansReturn, serverUri string) {
 	results <- rvalue
 }
 
+//  sumTotalPayments adds all payments that have been made to a debt
 func (debt *Debt) sumTotalPayments() (decimal.Decimal, int) {
 	var rvalue decimal.Decimal
 	var paymentCount int
@@ -528,6 +538,7 @@ func (debt *Debt) sumTotalPayments() (decimal.Decimal, int) {
 	return rvalue, paymentCount
 }
 
+//  isDebtPaidOff checks if a debt is paid or not
 func (debt *Debt) isDebtPaidOff() bool {
 	rc := false
 	if !debt.remainingAmountCalculated {
@@ -540,6 +551,7 @@ func (debt *Debt) isDebtPaidOff() bool {
 	return rc
 }
 
+//  calculateRemainingAmount determines how much money is still left over in the debt
 func (debt *Debt) calculateRemainingAmount(updateObject bool) decimal.Decimal {
 	var rvalue decimal.Decimal
 
@@ -580,39 +592,33 @@ func (debt *Debt) isPaymentPlanActive() bool {
 	return rc
 }
 
-//  We have a potentially nasty set of problems related to matching up scheduled payment
-//  dates with actual dates and amounts:
-//  1. Given the data provided, we are missing the original scheduled payoff date, so we
-//      can't work backwards from that.
-//  2. Given the data provided, we are also missing the original debt amount, which
-//      in conjunction with remaining_amount, we might have used to infer a payment schedule
-//  3. As mentioned in the spec, the customer could have made random payments that are not on schedule
-//  4. Valid scheduled payments may not have posted on their scheduled dates
-//  Given those problems, we're going to make a couple of assumptions:
-//  i. A payment that falls within a certain number of days of a payment date will count
-//      as a scheduled payment. We are going to call that a grace period, and is defined
-//      as the constant 'gracePeriodInDays' at the top of a program.
+//  calculateNextPayemntDate calculates the next payment date from a startdate and frequency
 func (debt *Debt) calculateNextPaymentDate(updateObject bool) string {
 	var nextPaymentDate string
 
 	//  First make sure a payment plan is active
 	if debt.isPaymentPlanActive() {
+		var nextScheduledDate time.Time
+
 		//  Does this debt have any outstanding payments?
 		paymentCount := len(debt.paymentPlan.payments)
 		if paymentCount > 0 {
-			var nextScheduledDate time.Time
-
-			var xpayment Payment
 
 			//  Starting with most recent payment made and working backwards,
-			//  Grab the last payment that was made and then add the payment period
+			//  Grab the last SCHEDULED payment that was made and then add the payment period
 			for i := paymentCount - 1; i >= 0 && nextScheduledDate.IsZero(); i-- {
-				pmt := debt.paymentPlan.payments[i]
+				pmt := &debt.paymentPlan.payments[i]
 
-				lastScheduledPaymentDate, err := debt.lastScheduledDateNotExceedingPaymentDate(pmt.date)
+				//  Did the pmt fall on a scheduled payment date? If not, we need to find one that
+				//  did, as unscheduled payments don't count as scheduled
+				if !pmt.scheduled {
+					continue
+				}
 
-				//  If one of those failed, I don't know what to tell ya'...
-				if err != nil || lastScheduledPaymentDate.IsZero() {
+				lastScheduledPaymentDate := pmt.date
+
+				//  This shouldn't be zero
+				if lastScheduledPaymentDate.IsZero() {
 					return nextPaymentDate
 				} else {
 					d, tempErr := paymentFrequencyAsDuration(debt.paymentPlan.InstallmentFrequency)
@@ -623,26 +629,26 @@ func (debt *Debt) calculateNextPaymentDate(updateObject bool) string {
 
 					//  Add the duration to the schedule
 					nextScheduledDate = lastScheduledPaymentDate.Add(d)
-					xpayment = pmt
-				}
-			}
-
-			if !nextScheduledDate.IsZero() {
-				nextPaymentDate = nextScheduledDate.Format(isoLayout)
-
-				if !nextScheduledDate.After(xpayment.date) {
-					fmt.Printf("Last Payment date (%v) is after the chosen next date (%v)", xpayment.date, nextScheduledDate)
 				}
 			}
 		}
-	}
+		if nextScheduledDate.IsZero() {
+			//  If we get here, then none of their payments were made on schedule
+			nextScheduledDate = debt.paymentPlan.startDate
+		}
+		nextPaymentDate = nextScheduledDate.Format(isoDateLayout)
 
-	if updateObject && len(nextPaymentDate) > 0 {
-		debt.NextPaymentDate = &nextPaymentDate
+		if updateObject && len(nextPaymentDate) > 0 {
+			debt.NextPaymentDate = &nextPaymentDate
+		}
+
 	}
 
 	return nextPaymentDate
 }
+
+//  paymentFrequencyAsDuration converts a payment frequency to a go time.Duration; used
+//  for adding dates
 func paymentFrequencyAsDuration(freq string) (time.Duration, error) {
 	var rvalue time.Duration
 	var err error = nil
@@ -670,6 +676,8 @@ func paymentFrequencyAsDuration(freq string) (time.Duration, error) {
 	return rvalue, err
 }
 
+//  Not used, but left-in for posterity- I did this before I re-read the spec and saw this important point-
+//  Payments made on days outside the expected payment schedule still go toward paying off the remaining_amount, but do not change/delay the payment schedule.
 func (debt *Debt) lastScheduledDateNotExceedingPaymentDate(date time.Time) (time.Time, error) {
 	var rvalue time.Time
 	var err error = nil
@@ -706,6 +714,10 @@ func (debt *Debt) lastScheduledDateNotExceedingPaymentDate(date time.Time) (time
 	return rvalue, err
 }
 
+//  datesWithinGracePeriodRange was used to determine if payments
+//  that fell within a few days +/- (but not exactly) of scheduled dates
+//  were counted as payment dates. Ended up not using this, but left in for posterity,
+//  because it would almost certainly be needed live
 func datesWithinGracePeriodRange(t1 time.Time, t2 time.Time) bool {
 	rc := false
 
@@ -715,4 +727,72 @@ func datesWithinGracePeriodRange(t1 time.Time, t2 time.Time) bool {
 		rc = true
 	}
 	return rc
+}
+
+//  tagScheduledPayments marks payments that fall on a schedule with a flag
+func (plan *PaymentPlan) tagScheduledPayments() {
+	for idx, _ := range plan.payments {
+		plan.payments[idx].scheduled = plan.isPaymentDateAScheduledDate(plan.payments[idx].date)
+	}
+}
+
+//  generatePaymentSchedule generates a payment schedule based on a plan's start date and frequency.
+//  any payments made not on this schedule is not recognized as having satisfied the schedule.
+//  In a true production environment this requirement make much sense, which is why I started
+// down the pah of added a gracePeroid, but that
+func (plan *PaymentPlan) generatePaymentSchedule() {
+	var err error = nil
+
+	duration, err := paymentFrequencyAsDuration(plan.InstallmentFrequency)
+
+	if err == nil {
+		runningDate := plan.startDate
+		anticipatedDebtAmount := plan.AmountToPay
+
+		for anticipatedDebtAmount.IsPositive() {
+			if plan.schedule == nil {
+				plan.schedule = make(map[time.Time]decimal.Decimal)
+			}
+			plan.schedule[runningDate] = anticipatedDebtAmount
+			runningDate = runningDate.Add(duration)
+			anticipatedDebtAmount = anticipatedDebtAmount.Sub(plan.InstallmentAmount)
+		}
+	}
+}
+
+//  isPaymentDateAScheduledDate is used to see if a specified date is in the schedule
+func (plan *PaymentPlan) isPaymentDateAScheduledDate(paymentDate time.Time) bool {
+	rc := false
+
+	_, ok := plan.schedule[paymentDate]
+
+	rc = ok
+	return rc
+}
+
+//  dumpPaymentSchedule was used during debugging for diagnosing some edge-cases
+func (plan *PaymentPlan) dumpPaymentSchedule() {
+	fmt.Printf("Payment schedule for plan id:%v, startdate:%v, amount:%v\n", plan.ID, plan.startDate.Format(isoDateLayout), plan.AmountToPay)
+	if len(plan.schedule) > 0 {
+		for k, _ := range plan.schedule {
+			fmt.Printf("%v\n", k.Format(isoDateLayout))
+		}
+	} else {
+		fmt.Println("No Scheduled Payments")
+	}
+	fmt.Println()
+}
+
+//  dumpPayments() was used during debugging for diagnosing some edge-cases and left in for posterity
+func (plan *PaymentPlan) dumpPayments() {
+	fmt.Printf("Payments for plan id:%v, startdate:%v, amount:%v\n", plan.ID, plan.startDate.Format(isoDateLayout), plan.AmountToPay)
+	if len(plan.payments) > 0 {
+		for _, pmt := range plan.payments {
+			fmt.Printf("Payment Date:%v   Amount:%v  Scheduled:%v\n", pmt.date.Format(isoDateLayout), pmt.Amount, pmt.scheduled)
+		}
+	} else {
+		fmt.Println("No payments ")
+	}
+
+	fmt.Println()
 }

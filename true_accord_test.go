@@ -36,7 +36,8 @@ func getRawTestObjects() (debtTestData map[int]Debt, paymentPlanTestData map[int
 	}
 
 	paymentPlanTestData = map[int]PaymentPlan{
-		0:  {ID: 0, DebtID: 0, AmountToPay: decimal.NewFromFloat(1000000.00), InstallmentFrequency: "bi_weekly", InstallmentAmount: decimal.NewFromInt32(1000), StartDate: "2021-05-31"}, //  Test Payments scheduled in the future
+		0: {ID: 0, DebtID: 0, AmountToPay: decimal.NewFromFloat(1000000.00), InstallmentFrequency: "bi_weekly", InstallmentAmount: decimal.NewFromInt32(1000), StartDate: "2021-05-31"}, //  Test Payments scheduled in the future
+
 		1:  {ID: 1, DebtID: 1, AmountToPay: decimal.NewFromFloat(0.00), InstallmentFrequency: "weekly", InstallmentAmount: decimal.NewFromInt32(175), StartDate: "2020-01-31"},
 		2:  {ID: 2, DebtID: 2, AmountToPay: decimal.NewFromFloat(42000.00), InstallmentFrequency: "bi_weekly", InstallmentAmount: decimal.NewFromInt32(300), StartDate: "2020-05-28"},
 		3:  {ID: 3, DebtID: 3, AmountToPay: decimal.NewFromFloat(399.00), InstallmentFrequency: "weekly", InstallmentAmount: decimal.NewFromInt32(25), StartDate: "2020-10-21"},
@@ -87,14 +88,14 @@ func getRawTestObjects() (debtTestData map[int]Debt, paymentPlanTestData map[int
 
 	for key, plan := range paymentPlanTestData {
 		if len(plan.StartDate) > 0 {
-			plan.startDate, _ = time.Parse(isoLayout, plan.StartDate)
+			plan.startDate, _ = time.Parse(isoDateLayout, plan.StartDate)
 			paymentPlanTestData[key] = plan
 		}
 	}
 
 	for idx, pmt := range paymentsTestData {
 		if len(pmt.Date) > 0 {
-			pmt.date, _ = time.Parse(isoLayout, pmt.Date)
+			pmt.date, _ = time.Parse(isoDateLayout, pmt.Date)
 			paymentsTestData[idx] = pmt
 		}
 	}
@@ -195,11 +196,11 @@ func TestDebt_calculateNextPaymentDate(t *testing.T) {
 	t.Logf("Checking the next scheduled date when payments occur before the start date")
 	debt := debts[11]
 	dateString = debt.calculateNextPaymentDate(false)
-	got, err = time.Parse(isoLayout, dateString)
+	got, err = time.Parse(isoDateLayout, dateString)
 	if err != nil {
 		t.Errorf("calculateNextPaymentDate() error parsing date returned from calculateNextPaymentDate (%v):%v", dateString, err)
 	}
-	want, err = time.Parse(isoLayout, "2020-11-12")
+	want, err = time.Parse(isoDateLayout, "2020-11-05")
 	if got != want {
 		t.Errorf("Got:%v but wanted %v", got, want)
 	}
@@ -207,11 +208,11 @@ func TestDebt_calculateNextPaymentDate(t *testing.T) {
 	t.Logf("Trying to confuse the next-date algorithm")
 	debt = debts[2]
 	dateString = debt.calculateNextPaymentDate(false)
-	got, err = time.Parse(isoLayout, dateString)
+	got, err = time.Parse(isoDateLayout, dateString)
 	if err != nil {
 		t.Errorf("calculateNextPaymentDate() error parsing date returned from calculateNextPaymentDate (%v):%v", dateString, err)
 	}
-	want, err = time.Parse(isoLayout, "2021-04-15")
+	want, err = time.Parse(isoDateLayout, "2021-04-15")
 	if got != want {
 		t.Errorf("Got:%v but wanted %v", got, want)
 	}
@@ -219,11 +220,11 @@ func TestDebt_calculateNextPaymentDate(t *testing.T) {
 	t.Logf("Checking no payments made on correct date")
 	debt = debts[3]
 	dateString = debt.calculateNextPaymentDate(false)
-	got, err = time.Parse(isoLayout, dateString)
+	got, err = time.Parse(isoDateLayout, dateString)
 	if err != nil {
 		t.Errorf("calculateNextPaymentDate() error parsing date returned from calculateNextPaymentDate (%v):%v", dateString, err)
 	}
-	want, err = time.Parse(isoLayout, "2021-01-06")
+	want, err = time.Parse(isoDateLayout, "2020-10-21")
 	if got != want {
 		t.Errorf("Got:%v but wanted %v", got, want)
 	}
